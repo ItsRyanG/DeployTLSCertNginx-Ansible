@@ -1,0 +1,119 @@
+---
+
+# Ensure OpenSSL is installed
+- name: Ensure OpenSSL is installed
+  package:
+    name: openssl
+    state: present
+
+# Manage SSL certificates and perform verifications
+- name: Manage and verify SSL certificates
+  block:
+    
+    # Copying certificate components
+    - name: Copy certificate for {{ item.name }}
+      copy:
+        content: "{{ item.ssl_cert }}"
+        dest: "{{ item.ssl_certificate_path }}"
+        backup: yes
+        mode: u=rw,g=r,o=r
+      register: cert_copy
+
+    - name: Copy private key for {{ item.name }}
+      copy:
+        content: "{{ item.ssl_key }}"
+        dest: "{{ item.ssl_key_path }}"
+        backup: yes
+        mode: u=rw,g=r,o=r
+      register: key_copy
+
+    - name: Copy intermediate trust certificate for {{ item.name }}
+      copy:
+        content: "{{ item.ssl_intermediate }}"
+        dest: "{{ item.ssl_intermediate_path }}"
+        backup: yes
+        mode: u=rw,g=r,o=r
+      register: intermediate_copy
+
+    - name: Copy root certificate for {{ item.name }}
+      copy:
+        content: "{{ item.ssl_ca }}"
+        dest: "{{ item.ssl_ca_path }}"
+        backup: yes
+        mode: u=rw,g=r,o=r
+      register: ca_copy
+
+    # Verify certificate chain
+    - name: Verify certificate chain
+      shell: |
+        openssl verify -CAfile {{ item.ssl_ca_path }} -untrusted {{ item.ssl_intermediate_path }} {{ item.ssl_certificate_path }}
+      register: openssl_verify
+      changed_when: false
+
+    - debug:
+        msg: "{{ openssl_verify.stdout_lines }}{{ openssl_verify.stderr_lines }}"
+      failed_when: openssl_verify.rc != 0
+
+    # Concatenate certificates to form a chain
+    - name: Concatenate certificate chain to {{ item.ssl_certificate_path }}
+      copy:
+        content: "{{ item.ssl_cert + '\n' + item.ssl_intermediate + '\n' + item.ssl_ca }}"
+        dest: "{{ item.ssl_certificate_path }}"
+        backup: yes
+        mode: u=rw,g=r,o=r
+
+    # Reload and verify nginx
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: restarted
+      register: nginx_reload
+
+    - name: Verify the certificate with OpenSSL s_client
+      shell: |
+        echo "QUIT" | 
+        openssl s_client -connect localhost:443 -servername {{ item.verify }} | 
+        grep "Verify return code: 0 (ok)"
+      register: s_client_result
+      changed_when: false
+      
+    - debug:
+        msg: "{{ s_client_result.stdout_lines }}{{ s_client_result.stderr_lines }}"
+      failed_when: s_client_result.rc != 0
+
+  # Recovery steps if any of the above fail
+  rescue:
+    
+    - name: Restore original certificate files
+      copy: 
+        src: "{{ cert_copy.backup_file }}"
+        dest: "{{ item.ssl_certificate_path }}"
+        remote_src: true
+      when: cert_copy.backup_file is defined
+
+    - copy: 
+        src: "{{ key_copy.backup_file }}"
+        dest: "{{ item.ssl_key_path }}"
+        remote_src: true
+      when: key_copy.backup_file is defined
+
+    - copy: 
+        src: "{{ intermediate_copy.backup_file }}"
+        dest: "{{ item.ssl_intermediate_path }}"
+        remote_src: true
+      when: intermediate_copy.backup_file is defined
+
+    - copy: 
+        src: "{{ ca_copy.backup_file }}"
+        dest: "{{ item.ssl_ca_path }}"
+        remote_src: true
+      when: ca_copy.backup_file is defined
+
+    - debug:
+        msg: "{{ s_client_result }}"
+
+    - service:
+        name: nginx
+        state: restarted
+      when: s_client_result.rc != 0 or nginx_reload.rc != 0
+      ignore_errors: true
