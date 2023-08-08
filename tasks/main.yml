@@ -1,13 +1,17 @@
 ---
 
-- name: yum install openssl
+# Ensure OpenSSL is installed
+- name: Ensure OpenSSL is installed
   package:
     name: openssl
     state: present
 
-- name: copy certificates and verify chain 
+# Manage SSL certificates and perform verifications
+- name: Manage and verify SSL certificates
   block:
-    - name: copy certificate for {{ item.name }}
+    
+    # Copying certificate components
+    - name: Copy certificate for {{ item.name }}
       copy:
         content: "{{ item.ssl_cert }}"
         dest: "{{ item.ssl_certificate_path }}"
@@ -15,7 +19,7 @@
         mode: u=rw,g=r,o=r
       register: cert_copy
 
-    - name: copy private key for {{ item.name }}
+    - name: Copy private key for {{ item.name }}
       copy:
         content: "{{ item.ssl_key }}"
         dest: "{{ item.ssl_key_path }}"
@@ -23,7 +27,7 @@
         mode: u=rw,g=r,o=r
       register: key_copy
 
-    - name: copy intermediate trust certificate for {{ item.name }}
+    - name: Copy intermediate trust certificate for {{ item.name }}
       copy:
         content: "{{ item.ssl_intermediate }}"
         dest: "{{ item.ssl_intermediate_path }}"
@@ -31,7 +35,7 @@
         mode: u=rw,g=r,o=r
       register: intermediate_copy
 
-    - name: copy root certificate for {{ item.name }}
+    - name: Copy root certificate for {{ item.name }}
       copy:
         content: "{{ item.ssl_ca }}"
         dest: "{{ item.ssl_ca_path }}"
@@ -39,63 +43,70 @@
         mode: u=rw,g=r,o=r
       register: ca_copy
 
-    - name: verify certificate chain
+    # Verify certificate chain
+    - name: Verify certificate chain
       shell: |
         openssl verify -CAfile {{ item.ssl_ca_path }} -untrusted {{ item.ssl_intermediate_path }} {{ item.ssl_certificate_path }}
       register: openssl_verify
       changed_when: false
+
     - debug:
         msg: "{{ openssl_verify.stdout_lines }}{{ openssl_verify.stderr_lines }}"
-      failed_when: openssl_verify.rc >= 1
+      failed_when: openssl_verify.rc != 0
 
-    - name: copy cerificate chain to {{ item.ssl_certificate_path }}
+    # Concatenate certificates to form a chain
+    - name: Concatenate certificate chain to {{ item.ssl_certificate_path }}
       copy:
-        content: "{{ item.ssl_cert + '\n' + item.ssl_intermediate + '\n' + item.ssl_ca + '\n' }}"
+        content: "{{ item.ssl_cert + '\n' + item.ssl_intermediate + '\n' + item.ssl_ca }}"
         dest: "{{ item.ssl_certificate_path }}"
         backup: yes
         mode: u=rw,g=r,o=r
 
-    - name: reload nginx
+    # Reload and verify nginx
+    - name: Reload nginx
       service:
         name: nginx
         state: restarted
       register: nginx_reload
 
-    - name: verify the cerificate
+    - name: Verify the certificate with OpenSSL s_client
       shell: |
         echo "QUIT" | 
         openssl s_client -connect localhost:443 -servername {{ item.verify }} | 
         grep "Verify return code: 0 (ok)"
       register: s_client_result
       changed_when: false
+      
     - debug:
         msg: "{{ s_client_result.stdout_lines }}{{ s_client_result.stderr_lines }}"
-      failed_when: s_client_result.rc >= 1
-    
+      failed_when: s_client_result.rc != 0
+
+  # Recovery steps if any of the above fail
   rescue:
-    - name: restore original certificate files
+    
+    - name: Restore original certificate files
       copy: 
         src: "{{ cert_copy.backup_file }}"
         dest: "{{ item.ssl_certificate_path }}"
-        remote_src: yes
+        remote_src: true
       when: cert_copy.backup_file is defined
 
     - copy: 
         src: "{{ key_copy.backup_file }}"
         dest: "{{ item.ssl_key_path }}"
-        remote_src: yes
+        remote_src: true
       when: key_copy.backup_file is defined
 
     - copy: 
         src: "{{ intermediate_copy.backup_file }}"
         dest: "{{ item.ssl_intermediate_path }}"
-        remote_src: yes
+        remote_src: true
       when: intermediate_copy.backup_file is defined
 
     - copy: 
         src: "{{ ca_copy.backup_file }}"
         dest: "{{ item.ssl_ca_path }}"
-        remote_src: yes
+        remote_src: true
       when: ca_copy.backup_file is defined
 
     - debug:
@@ -104,8 +115,5 @@
     - service:
         name: nginx
         state: restarted
-      when: s_client_result.rc >= 1 or 
-            nginx_reload.rc >= 1
-      ignore_errors: yes
-      
-
+      when: s_client_result.rc != 0 or nginx_reload.rc != 0
+      ignore_errors: true
